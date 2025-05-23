@@ -3,7 +3,7 @@ import os
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
-from solver_se import Solver
+from solver_patch import Solver
 import datetime
 import random
 
