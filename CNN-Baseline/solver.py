@@ -27,14 +27,14 @@ class Solver(object):
         #self.args.lr = 0.0002
         self.train_dataloader, self.val_dataloader, self.test_dataloader = paired_loader(self.args)
         # define the network here
-        self.model = UNetWithClassifier(in_channels=1, out_channels=2, num_classes=2, final_sigmoid=False, f_maps=[16, 32, 64, 128], num_levels=4, is_segmentation=True).cuda()
+        self.model = UNetWithClassifier(in_channels=1, out_channels=1, num_classes=2, final_sigmoid=False, f_maps=[16, 32, 64, 128], num_levels=4, is_segmentation=True).cuda()
         # self.model = UNetWithClassifier(in_channels=1, out_channels=2, num_classes=2, final_sigmoid=False, f_maps=[32, 64], num_levels=2, is_segmentation=True).cuda()
         # define the loss here, add focal loss later
-        weights = [0.01, 100.0]
+        weights = [100.0]
         class_weights = torch.FloatTensor(weights).cuda()
         #self.seg_ce_loss = nn.CrossEntropyLoss(weight=class_weights)
         self.ce_loss = nn.BCEWithLogitsLoss()
-        self.seg_ce_loss = WeightedCrossEntropyLoss(ignore_index=-100)
+        self.seg_ce_loss = nn.BCEWithLogitsLoss()
         self.dice_loss = DiceLoss(weight=class_weights, normalization='sigmoid') 
         #self.fc_loss = FocalLoss(alpha=class_weights, gamma=2)
 
@@ -64,8 +64,8 @@ class Solver(object):
         logger['loss'] = list()
         logger['dice'] = list()
         logger['dice_bg'] = list()
-        logger['ce_loss'] = list()
-        logger['seg_ce_loss'] = list()
+        logger['bce_loss'] = list()
+        logger['seg_bce_loss'] = list()
         logger['dice_loss'] = list()
 
         test_logger = {}
@@ -106,14 +106,15 @@ class Solver(object):
 
                 pred_logits, pred_label = self.model(inputs)
                 pred_mask = torch.sigmoid(pred_logits)
-                pred_mask = torch.argmax(pred_mask, dim=1)
-                mask_one_hot = F.one_hot(gt_mask.long(), num_classes=2).permute(0, 4, 1, 2, 3).cuda() # 256, 2, 1, 64, 64, 48
+                pred_mask = (pred_mask > 0.1).long()
+                #pred_mask = torch.argmax(pred_mask, dim=1)
+                mask_one_hot = F.one_hot(gt_mask.long(), num_classes=1).permute(0, 4, 1, 2, 3).cuda() # 256, 2, 1, 64, 64, 48
                 #patch_labels_oh = F.one_hot(patch_labels.long(), num_classes=2).squeeze().float().cuda()
                 # loss calculation
                 dice_loss = self.dice_loss(pred_logits, mask_one_hot.float())
                 #pdb.set_trace()
                 seg_ce_loss = self.seg_ce_loss(pred_logits, gt_mask.long())
-                ce_loss = self.ce_loss(pred_label, patch_labels_oh)
+                ce_loss = self.ce_loss(pred_label, cmb_label)
                 batch_loss = dice_loss + seg_ce_loss + ce_loss
 
                 # epoch loss
@@ -171,13 +172,13 @@ class Solver(object):
             logger['loss'].append(avg_train_loss)
             logger['dice'].append(avg_train_dice)
             logger['dice_bg'].append(avg_train_dice_bg)
-            logger['ce_loss'].append(avg_train_ce_loss)
-            logger['seg_ce_loss'].append(avg_train_segce_loss)
+            logger['bce_loss'].append(avg_train_ce_loss)
+            logger['seg_bce_loss'].append(avg_train_segce_loss)
             logger['dice_loss'].append(avg_train_dice_loss)
 
             print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain Loss: {avg_train_loss}')
-            print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain Pixel-based CE Loss: {avg_train_segce_loss}')
-            print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain CE Loss: {avg_train_ce_loss}')
+            print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain Pixel-based BCE Loss: {avg_train_segce_loss}')
+            print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain BCE Loss: {avg_train_ce_loss}')
             print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain Dice Loss: {avg_train_dice_loss}')
             print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain DICE Coeff: {avg_train_dice}')
             print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain DICE Coeff (with background): {avg_train_dice_bg}')
@@ -261,9 +262,10 @@ class Solver(object):
                 
                 pred_logits, pred_label = self.model(inputs)
                 pred_mask = torch.sigmoid(pred_logits)
+                pred_mask = (pred_mask > 0.1).long()
                 # print(f"Max output value: {outputs.max().item()}, Min output value: {outputs.min().item()}")
-                pred_mask = torch.argmax(pred_mask, dim=1)
-                mask_one_hot = F.one_hot(gt_mask.long(), num_classes=2).permute(0, 4, 1, 2, 3).cuda()
+                #pred_mask = torch.argmax(pred_mask, dim=1)
+                mask_one_hot = F.one_hot(gt_mask.long(), num_classes=1).permute(0, 4, 1, 2, 3).cuda()
                 #patch_labels_oh = F.one_hot(patch_labels.long(), num_classes=2).squeeze().float().cuda()
                 # dice_loss = self.dice_loss(pred_mask, mask_one_hot.float())
                 # seg_ce_loss = self.seg_ce_loss(pred_mask, gt_mask)
@@ -325,8 +327,8 @@ class Solver(object):
         avg_ce_loss = ce_loss_test/len(self.test_dataloader)
 
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Loss: {average_loss}')
-        print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Pixel-based CE Loss: {avg_segce_loss}')
-        print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest CE Loss: {avg_ce_loss}')
+        print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Pixel-based BCE Loss: {avg_segce_loss}')
+        print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest BCE Loss: {avg_ce_loss}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Dice Loss: {avg_dice_loss}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest DICE Coeff: {average_dice}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest DICE Coeff (with background): {average_dice_bg}')
@@ -375,9 +377,10 @@ class Solver(object):
                 
                 pred_logits, pred_label = self.model(inputs)
                 pred_mask = torch.sigmoid(pred_logits)
+                pred_mask = (pred_mask > 0.1).long()
                 # print(f"Max output value: {outputs.max().item()}, Min output value: {outputs.min().item()}")
-                pred_mask = torch.argmax(pred_mask, dim=1)
-                mask_one_hot = F.one_hot(gt_mask.long(), num_classes=2).permute(0, 4, 1, 2, 3).cuda()
+                #pred_mask = torch.argmax(pred_mask, dim=1)
+                mask_one_hot = F.one_hot(gt_mask.long(), num_classes=1).permute(0, 4, 1, 2, 3).cuda()
                 #patch_labels_oh = F.one_hot(patch_labels.long(), num_classes=2).squeeze().float().cuda()
                 # dice_loss = self.dice_loss(pred_mask, mask_one_hot.float())
                 # seg_ce_loss = self.seg_ce_loss(pred_mask, gt_mask)
@@ -439,8 +442,8 @@ class Solver(object):
         avg_ce_loss = ce_loss_test/len(self.test_dataloader)
 
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Loss: {average_loss}')
-        print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Pixel-based CE Loss: {avg_segce_loss}')
-        print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest CE Loss: {avg_ce_loss}')
+        print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Pixel-based BCE Loss: {avg_segce_loss}')
+        print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest BCE Loss: {avg_ce_loss}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Dice Loss: {avg_dice_loss}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest DICE Coeff: {average_dice}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest DICE Coeff (with background): {average_dice_bg}')
