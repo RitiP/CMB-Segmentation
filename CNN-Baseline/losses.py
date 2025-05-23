@@ -93,8 +93,43 @@ class UnifiedSegmentationLoss(nn.Module):
 
         return total_loss, {'ce_loss': ce_loss, 'dice_loss': dice_loss, 'edge_loss': edge_intensity_loss}
 
+class SoftDiceLoss(nn.Module):
+    def __init__(self, smooth: float = 1e-6):
+        """
+        Soft Dice Loss for binary segmentation.
 
+        Args:
+            smooth: small constant to avoid division by zero.
+        """
+        super().__init__()
+        self.smooth = smooth
 
+    def forward(self, probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            probs:   Tensor of shape [B, 1, D, H, W], with values in [0,1]
+            targets: Tensor of shape [B, 1, D, H, W], binary {0,1}
+
+        Returns:
+            scalar tensor: 1 - mean_batch(Dice)
+        """
+        # flatten batch & spatial dims
+        B = probs.shape[0]
+        probs_flat   = probs.view(B, -1)
+        targets_flat = targets.view(B, -1).float()
+
+        # intersection & unions
+        intersection = (probs_flat * targets_flat).sum(dim=1)
+        sums         = probs_flat.sum(dim=1) + targets_flat.sum(dim=1)
+
+        # dice score per sample
+        dice_score = (2 * intersection + self.smooth) / (sums + self.smooth)
+
+        # dice loss (1 – dice)
+        loss = 1 - dice_score
+
+        # average over batch
+        return loss.mean()
 
 class _MaskingLossWrapper(nn.Module):
     """
