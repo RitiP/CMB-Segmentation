@@ -122,6 +122,8 @@ class MRIDataset(Dataset):
 
         if mode == "train":
             df_data = pd.read_csv(os.path.join(self.data_path, "train.csv"))
+        elif mode == "val":
+            df_data = pd.read_csv(os.path.join(self.data_path, "val.csv"))
         elif mode == "test":
             df_data = pd.read_csv(os.path.join(self.data_path, "test.csv"))
         
@@ -149,7 +151,7 @@ class MRIDataset(Dataset):
             image, mask = self.transform(image), self.transform(mask)
         image = torch.tensor(image, dtype=torch.float32).unsqueeze(0)
         mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
-        cmb_label_vol = (mask.sum() > 0).float()
+        cmb_label_vol = (mask.sum() > 0).long()
 
         return img_path, image, mask, cmb_label_vol
 
