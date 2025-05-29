@@ -72,7 +72,7 @@ if __name__ == '__main__':
     parser.add_argument('--cubic_len', type=int, default=256, help='smaller cubic len')
     parser.add_argument('--padding_len', type=int, default=24, help='padding')
     
-    parser.add_argument('--data_path', type=str, default='/scratch/ktan24/documents/CMB_dataset/')
+    parser.add_argument('--data_path', type=str, default='/scratch/ktan24/documents/CMB_seg_dataset/')
     #parser.add_argument('--data_path', type=str, default='/scratch/rpaul12/CMB_segmentation/datasets/')
     #parser.add_argument('--data_path', type=str, default='/data/amciilab/yaoxin/papaGAN_proejct/0629_datasets_copy/')
     parser.add_argument('--paired_dataset', type=str, default='ALL')
