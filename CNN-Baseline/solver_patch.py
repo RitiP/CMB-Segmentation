@@ -69,8 +69,8 @@ class Solver(object):
         logger['loss'] = list()
         logger['dice'] = list()
         logger['dice_bg'] = list()
-        logger['bce_loss'] = list()
-        logger['seg_bce_loss'] = list()
+        logger['ce_loss'] = list()
+        logger['seg_ce_loss'] = list()
         logger['dice_loss'] = list()
 
         test_logger = {}
@@ -92,10 +92,11 @@ class Solver(object):
 
             for fname, inputs, gt_mask, patch_labels in self.train_dataloader:
                 inputs, gt_mask, patch_labels = inputs.cuda(), gt_mask.cuda(), patch_labels.cuda()
+                # pdb.set_trace()
                 inputs_shape = inputs.shape
                 # reshape to (B*P,C,D,H,W), P - patches
                 inputs = inputs.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4])
-                gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], inputs_shape[2], inputs_shape[3], inputs_shape[4]) # 256, 64, 64, 48
+                gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4]) # 256, 64, 64, 48
                 patch_labels = patch_labels.permute(1, 0)
                 #cmb_label = F.one_hot(cmb_label, num_classes=2)
                 #pdb.set_trace()
@@ -105,12 +106,13 @@ class Solver(object):
                 pred_mask = torch.sigmoid(pred_logits)
                 pred_mask = (pred_mask > 0.1).long()
                 #pred_mask = torch.argmax(pred_mask, dim=1)
-                mask_one_hot = F.one_hot(gt_mask.long(), num_classes=1).permute(0, 4, 1, 2, 3).cuda() # 256, 1, 64, 64, 48
+                # mask_one_hot = F.one_hot(gt_mask.long(), num_classes=1).permute(0, 4, 1, 2, 3).cuda() # 256, 1, 64, 64, 48
+                mask_one_hot = gt_mask
                 patch_labels_oh = F.one_hot(patch_labels.long(), num_classes=2).squeeze().float().cuda()
                 # loss calculation
                 dice_loss = self.dice_loss(pred_logits, mask_one_hot.float())
                 #pdb.set_trace()
-                seg_ce_loss = self.seg_ce_loss(pred_logits, gt_mask.long())
+                seg_ce_loss = self.seg_ce_loss(pred_logits, gt_mask)
                 ce_loss = self.ce_loss(pred_label, patch_labels_oh)
                 batch_loss = dice_loss + seg_ce_loss + ce_loss
 
@@ -254,7 +256,7 @@ class Solver(object):
                 # inputs = inputs.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4])
                 # gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4])
                 inputs = inputs.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4])
-                gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], inputs_shape[2], inputs_shape[3], inputs_shape[4]) # 256, 64, 64, 48                
+                gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4]) # 256, 64, 64, 48                
                 
                 patch_labels = patch_labels.permute(1, 0)
                 
@@ -263,12 +265,13 @@ class Solver(object):
                 pred_mask = (pred_mask > 0.1).long()
                 # print(f"Max output value: {outputs.max().item()}, Min output value: {outputs.min().item()}")
                 #pred_mask = torch.argmax(pred_mask, dim=1)
-                mask_one_hot = F.one_hot(gt_mask.long(), num_classes=1).permute(0, 4, 1, 2, 3).cuda()
+                # mask_one_hot = F.one_hot(gt_mask.long(), num_classes=1).permute(0, 4, 1, 2, 3).cuda()
+                mask_one_hot = gt_mask
                 patch_labels_oh = F.one_hot(patch_labels.long(), num_classes=2).squeeze().float().cuda()
                 # dice_loss = self.dice_loss(pred_mask, mask_one_hot.float())
                 # seg_ce_loss = self.seg_ce_loss(pred_mask, gt_mask)
                 dice_loss = self.dice_loss(pred_logits, mask_one_hot.float())
-                seg_ce_loss = self.seg_ce_loss(pred_logits, gt_mask.long())
+                seg_ce_loss = self.seg_ce_loss(pred_logits, gt_mask)
                 ce_loss = self.ce_loss(pred_label, patch_labels_oh)
 
                 dice_loss_test += dice_loss.item()
@@ -369,7 +372,7 @@ class Solver(object):
                 # inputs = inputs.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4])
                 # gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4])
                 inputs = inputs.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4])
-                gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], inputs_shape[2], inputs_shape[3], inputs_shape[4]) # 256, 64, 64, 48          
+                gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4]) # 256, 64, 64, 48          
                 
                 patch_labels = patch_labels.permute(1, 0)
                 
@@ -378,12 +381,13 @@ class Solver(object):
                 pred_mask = (pred_mask > 0.1).long()
                 # print(f"Max output value: {outputs.max().item()}, Min output value: {outputs.min().item()}")
                 #pred_mask = torch.argmax(pred_mask, dim=1)
-                mask_one_hot = F.one_hot(gt_mask.long(), num_classes=1).permute(0, 4, 1, 2, 3).cuda()
+                # mask_one_hot = F.one_hot(gt_mask.long(), num_classes=1).permute(0, 4, 1, 2, 3).cuda()
+                mask_one_hot = gt_mask
                 patch_labels_oh = F.one_hot(patch_labels.long(), num_classes=2).squeeze().float().cuda()
                 # dice_loss = self.dice_loss(pred_mask, mask_one_hot.float())
                 # seg_ce_loss = self.seg_ce_loss(pred_mask, gt_mask)
                 dice_loss = self.dice_loss(pred_logits, mask_one_hot.float())
-                seg_ce_loss = self.seg_ce_loss(pred_logits, gt_mask.long())
+                seg_ce_loss = self.seg_ce_loss(pred_logits, gt_mask)
                 ce_loss = self.ce_loss(pred_label, patch_labels_oh)
 
                 dice_loss_test += dice_loss.item()
