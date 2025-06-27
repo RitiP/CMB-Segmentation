@@ -17,7 +17,55 @@ import pdb
 import time
 from model import UNetWithClassifier, UNet3D
 from losses import *
+import itertools
 
+def sample_positives(gt_mask):
+    """
+    gt_mask: Tensor [B, D, H, W], binary {0,1}
+    Returns: LongTensor of shape [N_pos,4] with (b, d, h, w) coords
+    """
+    return torch.nonzero(gt_mask==1, as_tuple=False)
+
+def sample_negatives(gt_mask, avoid_coords, num_neg):
+    """
+    gt_mask:       [B, D, H, W] binary
+    avoid_coords:  LongTensor [N_pos,4] coords to avoid
+    num_neg:       int, number of negatives desired
+    Returns: LongTensor [num_neg,4]
+    """
+    #B,D,H,W = gt_mask.shape
+    B,C,D,H,W = gt_mask.shape
+    # Gather all background coords
+    all_bg = []
+    for b in range(B):
+        pos = avoid_coords[avoid_coords[:,0]==b][:,1:]
+        # create a mask to exclude pos coords
+        mask = torch.ones((C,D,H,W), dtype=torch.bool, device=gt_mask.device)
+        if pos.numel()>0:
+            mask[pos[:,0], pos[:,1], pos[:,2], pos[:,3]] = False
+        coords = torch.nonzero((gt_mask[b]==0) & mask, as_tuple=False)
+        bcol = torch.full((coords.size(0),1), b, device=coords.device, dtype=torch.long)
+        all_bg.append(torch.cat([bcol, coords], dim=1))
+    all_bg = torch.cat(all_bg, dim=0)
+    if all_bg.size(0) <= num_neg:
+        return all_bg
+    idx = torch.randperm(all_bg.size(0), device=all_bg.device)[:num_neg]
+    return all_bg[idx]
+
+class PatchContrastiveLoss(nn.Module):
+    def __init__(self, tau=0.07):
+        super().__init__()
+        self.tau = tau
+
+    def forward(self, Z, labels):
+        # Z: [M, d], labels: [M] in {0,1}
+        sim = (Z @ Z.T) / self.tau            # [M,M]
+        mask = labels.unsqueeze(1).eq(labels.unsqueeze(0)).float()
+        mask.fill_diagonal_(0)                # exclude self
+        exp_sim = torch.exp(sim) * (1 - torch.eye(len(Z), device=Z.device))
+        log_prob = sim - torch.log(exp_sim.sum(1, keepdim=True) + 1e-12)
+        mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-12)
+        return -mean_log_prob_pos.mean()
 
 
 class Solver(object):
@@ -28,14 +76,19 @@ class Solver(object):
         self.train_dataloader, self.val_dataloader, self.test_dataloader = paired_loader(self.args)
         # define the network here
         self.model = UNet3D(in_channels=1, out_channels=1, num_classes=2, final_sigmoid=False, f_maps=[16, 32, 64, 128], num_levels=4, is_segmentation=True).cuda()
+        self.proj_head = nn.Sequential(
+                nn.Linear(17, 32), nn.ReLU(inplace=True),
+                nn.Linear(32, 16)).cuda()
         # self.model = UNetWithClassifier(in_channels=1, out_channels=2, num_classes=2, final_sigmoid=False, f_maps=[32, 64], num_levels=2, is_segmentation=True).cuda()
         # define the loss here, add focal loss later
+        self.con_batch = 64
         weights = [100.0]
         class_weights = torch.FloatTensor(weights).cuda()
         #self.seg_ce_loss = nn.CrossEntropyLoss(weight=class_weights)
         #self.ce_loss = nn.BCEWithLogitsLoss()
         self.seg_ce_loss = nn.BCEWithLogitsLoss()
         self.dice_loss = DiceLoss(weight=class_weights, normalization='sigmoid') 
+        self.contrastive_loss = PatchContrastiveLoss(tau=0.1)
         #self.fc_loss = FocalLoss(alpha=class_weights, gamma=2)
 
 
@@ -47,7 +100,7 @@ class Solver(object):
 
     def train(self):
 
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.args.lr, betas=(0.9, 0.999), weight_decay=1e-8)
+        self.optimizer = optim.Adam(itertools.chain(self.model.parameters(), self.proj_head.parameters()), lr=self.args.lr, betas=(0.9, 0.999), weight_decay=1e-8)
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, 'min', factor=0.1, patience=10, min_lr=1e-10, verbose=True)
 
         best_dice = 0
@@ -86,7 +139,7 @@ class Solver(object):
             self.model.train()  # Set the model to train mode
             total_dice = []
             total_dice_bg = []
-            train_dice_loss, train_ce_loss, train_seg_ce_loss = 0, 0, 0
+            train_dice_loss, train_ce_loss, train_seg_ce_loss, train_con_loss = 0, 0, 0, 0
             total_loss = 0.0
             total_true_positives = 0
             total_false_positives = 0
@@ -96,6 +149,7 @@ class Solver(object):
             for fname, inputs, gt_mask, cmb_label in self.train_dataloader:
                 inputs, gt_mask, cmb_label = inputs.cuda(), gt_mask.cuda(), cmb_label.cuda()
                 inputs_shape = inputs.shape
+                print(fname)
                 # reshape to (B*P,C,D,H,W), P - patches
                 #inputs = inputs.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4])
                 #gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], inputs_shape[2], inputs_shape[3], inputs_shape[4]) # 256, 1, 64, 64, 48
@@ -104,7 +158,7 @@ class Solver(object):
                 #pdb.set_trace()
                 self.optimizer.zero_grad()
 
-                pred_logits = self.model(inputs)
+                pred_logits, decoder_feats = self.model(inputs)
                 pred_mask = torch.sigmoid(pred_logits)
                 pred_mask = (pred_mask > 0.1).long()
                 #pred_mask = torch.argmax(pred_mask, dim=1)
@@ -116,13 +170,41 @@ class Solver(object):
                 #pdb.set_trace()
                 seg_ce_loss = self.seg_ce_loss(pred_logits, gt_mask.float())
                 #ce_loss = self.ce_loss(pred_label, cmb_label.float())
-                batch_loss = dice_loss + seg_ce_loss # + ce_loss
+                
+
+                pos_coords = sample_positives(gt_mask)
+                neg_coords = sample_negatives(gt_mask, pos_coords, self.con_batch)
+                # if CMB volume, start contrastive loss
+                if pos_coords.size(0) > 0:
+                    all_coords = torch.cat([pos_coords, neg_coords], dim=0)
+                    labels = torch.cat([torch.ones(len(pos_coords)), torch.zeros(len(neg_coords))], 0).long().to(inputs.device)
+
+                    embs = []
+                    for (b,c,d,h,w) in all_coords:
+                        f_patch = decoder_feats[b, :, d-10:d+10, h-10:h+10, w-10:w+10]  # [16,20,20,20]
+                        l_patch = pred_logits[b, :, d-10:d+10, h-10:h+10, w-10:w+10]      # [1,20,20,20]
+                        v_feat = f_patch.contiguous().view(16, -1).mean(dim=1)
+                        l_feat = l_patch.contiguous().view(1, -1).mean(dim=1)
+                        embs.append(torch.cat([v_feat, l_feat], dim=0))
+                    E = torch.stack(embs, dim=0)  # [2P,17]
+                
+                    # project & normalize
+                    Z = F.normalize(self.proj_head(E), dim=1)  # define proj_head in __init__
+                
+                    # contrastive loss
+                    loss_con = self.contrastive_loss(Z, labels)
+                else:
+                    loss_con = torch.tensor(0.).cuda()
+
+                batch_loss = dice_loss + seg_ce_loss + loss_con # + ce_loss
 
                 # epoch loss
                 train_dice_loss += dice_loss.item()
                 #train_ce_loss += ce_loss.item()
                 train_seg_ce_loss += seg_ce_loss.item()
-                total_loss += dice_loss.item() + seg_ce_loss.item() # + ce_loss.item()
+                train_con_loss += loss_con.item()
+                total_loss += dice_loss.item() + seg_ce_loss.item() + loss_con.item() # + ce_loss.item()
+
                 
                 # updates the parameters
                 batch_loss.backward()
@@ -163,6 +245,7 @@ class Solver(object):
             avg_train_dice_bg = sum(total_dice_bg)/len(total_dice_bg)
             avg_train_loss = total_loss/len(self.train_dataloader)
             avg_train_segce_loss = train_seg_ce_loss/len(self.train_dataloader)
+            avg_train_con_loss = train_con_loss/len(self.train_dataloader)
             #avg_train_ce_loss = train_ce_loss/len(self.train_dataloader)
             avg_train_dice_loss = train_dice_loss/len(self.train_dataloader)
             average_tp = total_true_positives/len(self.train_dataloader)
@@ -181,6 +264,7 @@ class Solver(object):
             print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain Pixel-based BCE Loss: {avg_train_segce_loss}')
             #print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain BCE Loss: {avg_train_ce_loss}')
             print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain Dice Loss: {avg_train_dice_loss}')
+            print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain Contrastive Loss: {avg_train_con_loss}')
             print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain DICE Coeff: {avg_train_dice}')
             print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain DICE Coeff (with background): {avg_train_dice_bg}')
             print(f'Iteration:{i+1}/{self.args.total_iters}\tTrain True Positive: {average_tp}')
@@ -238,12 +322,14 @@ class Solver(object):
     def val(self, train=False, cur_iter=0):
     
         self.model.eval()  # Set the model to evaluation mode
+        self.proj_head.eval()
         total_dice = []
         total_dice_bg = []
         total_loss = 0.0
         dice_loss_test = 0
         ce_loss_test = 0
         seg_ce_loss_test = 0
+        con_loss_test = 0
         total_true_positives = 0
         total_false_positives = 0
         total_false_negatives = 0
@@ -261,7 +347,7 @@ class Solver(object):
                 #gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], inputs_shape[2], inputs_shape[3], inputs_shape[4]) # 256, 1, 64, 64, 48                
                 #patch_labels = patch_labels.permute(1, 0)
                 
-                pred_logits = self.model(inputs)
+                pred_logits, decoder_feats = self.model(inputs)
                 pred_mask = torch.sigmoid(pred_logits)
                 pred_mask = (pred_mask > 0.1).long()
                 # print(f"Max output value: {outputs.max().item()}, Min output value: {outputs.min().item()}")
@@ -278,7 +364,33 @@ class Solver(object):
                 dice_loss_test += dice_loss.item()
                 #ce_loss_test += ce_loss.item()
                 seg_ce_loss_test += seg_ce_loss.item()
-                total_loss += dice_loss.item() + seg_ce_loss.item()# + ce_loss.item()
+
+                pos_coords = sample_positives(gt_mask)
+                neg_coords = sample_negatives(gt_mask, pos_coords, self.con_batch)
+                # if CMB volume, start contrastive loss
+                if pos_coords.size(0) > 0:
+                    all_coords = torch.cat([pos_coords, neg_coords], dim=0)
+                    labels = torch.cat([torch.ones(len(pos_coords)), torch.zeros(len(neg_coords))], 0).long().to(inputs.device)
+
+                    embs = []
+                    for (b,d,h,w) in all_coords:
+                        f_patch = decoder_feats[b, :, d-10:d+10, h-10:h+10, w-10:w+10]  # [16,20,20,20]
+                        l_patch = pred_logits[b, :, d-10:d+10, h-10:h+10, w-10:w+10]      # [1,20,20,20]
+                        v_feat = f_patch.view(16, -1).mean(dim=1)
+                        l_feat = l_patch.view(1, -1).mean(dim=1)
+                        embs.append(torch.cat([v_feat, l_feat], dim=0))
+                    E = torch.stack(embs, dim=0)  # [2P,17]
+                
+                    # project & normalize
+                    Z = F.normalize(self.proj_head(E), dim=1)  # define proj_head in __init__
+                
+                    # contrastive loss
+                    loss_con = self.contrastive_loss(Z, labels)
+                else:
+                    loss_con = torch.tensor(0.).cuda()
+
+                con_loss_test += loss_con.item()
+                total_loss += dice_loss.item() + seg_ce_loss.item() + loss_con.item() # + ce_loss.item()
                 #outputs = outputs > 0.1
                 metrics_dict = {}
 
@@ -326,12 +438,14 @@ class Solver(object):
         average_loss = total_loss/len(self.test_dataloader)
         avg_dice_loss = dice_loss_test/len(self.test_dataloader)
         avg_segce_loss = seg_ce_loss_test/len(self.test_dataloader)
+        avg_con_loss = con_loss_test/len(self.test_dataloader)
         #avg_ce_loss = ce_loss_test/len(self.test_dataloader)
 
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Loss: {average_loss}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Pixel-based BCE Loss: {avg_segce_loss}')
         #print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest BCE Loss: {avg_ce_loss}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Dice Loss: {avg_dice_loss}')
+        print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Contrastive Loss: {avg_con_loss}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest DICE Coeff: {average_dice}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest DICE Coeff (with background): {average_dice_bg}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest True Positive: {average_tp}')
@@ -359,6 +473,7 @@ class Solver(object):
         dice_loss_test = 0
         ce_loss_test = 0
         seg_ce_loss_test = 0
+        con_loss_test = 0
         total_true_positives = 0
         total_false_positives = 0
         total_false_negatives = 0
@@ -377,7 +492,7 @@ class Solver(object):
                 
                 #patch_labels = patch_labels.permute(1, 0)
                 
-                pred_logits = self.model(inputs)
+                pred_logits, decoder_feats = self.model(inputs)
                 pred_mask = torch.sigmoid(pred_logits)
                 pred_mask = (pred_mask > 0.1).long()
                 # print(f"Max output value: {outputs.max().item()}, Min output value: {outputs.min().item()}")
@@ -394,7 +509,34 @@ class Solver(object):
                 dice_loss_test += dice_loss.item()
                 #ce_loss_test += ce_loss.item()
                 seg_ce_loss_test += seg_ce_loss.item()
-                total_loss += dice_loss.item() + seg_ce_loss.item()# + ce_loss.item()
+
+                pos_coords = sample_positives(gt_mask)
+                neg_coords = sample_negatives(gt_mask, pos_coords, self.con_batch)
+                # if CMB volume, start contrastive loss
+                if pos_coords.size(0) > 0:
+                    all_coords = torch.cat([pos_coords, neg_coords], dim=0)
+                    labels = torch.cat([torch.ones(len(pos_coords)), torch.zeros(len(neg_coords))], 0).long().to(inputs.device)
+
+                    embs = []
+                    for (b,d,h,w) in all_coords:
+                        f_patch = decoder_feats[b, :, d-10:d+10, h-10:h+10, w-10:w+10]  # [16,20,20,20]
+                        l_patch = pred_logits[b, :, d-10:d+10, h-10:h+10, w-10:w+10]      # [1,20,20,20]
+                        v_feat = f_patch.view(16, -1).mean(dim=1)
+                        l_feat = l_patch.view(1, -1).mean(dim=1)
+                        embs.append(torch.cat([v_feat, l_feat], dim=0))
+                    E = torch.stack(embs, dim=0)  # [2P,17]
+                
+                    # project & normalize
+                    Z = F.normalize(self.proj_head(E), dim=1)  # define proj_head in __init__
+                
+                    # contrastive loss
+                    loss_con = self.contrastive_loss(Z, labels)
+                else:
+                    loss_con = torch.tensor(0.).cuda()
+
+                con_loss_test += loss_con.item()
+
+                total_loss += dice_loss.item() + seg_ce_loss.item() + loss_con.item() # + ce_loss.item()
                 #outputs = outputs > 0.1
                 metrics_dict = {}
 
@@ -442,12 +584,14 @@ class Solver(object):
         average_loss = total_loss/len(self.test_dataloader)
         avg_dice_loss = dice_loss_test/len(self.test_dataloader)
         avg_segce_loss = seg_ce_loss_test/len(self.test_dataloader)
+        avg_con_loss = con_loss_test/len(self.test_dataloader)
         #avg_ce_loss = ce_loss_test/len(self.test_dataloader)
 
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Loss: {average_loss}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Pixel-based BCE Loss: {avg_segce_loss}')
         #print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest BCE Loss: {avg_ce_loss}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Dice Loss: {avg_dice_loss}')
+        print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest Contrastive Loss: {avg_con_loss}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest DICE Coeff: {average_dice}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest DICE Coeff (with background): {average_dice_bg}')
         print(f'Iteration:{cur_iter+1}/{self.args.total_iters}\tTest True Positive: {average_tp}')
