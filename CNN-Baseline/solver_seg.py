@@ -149,7 +149,7 @@ class Solver(object):
             for fname, inputs, gt_mask, cmb_label in self.train_dataloader:
                 inputs, gt_mask, cmb_label = inputs.cuda(), gt_mask.cuda(), cmb_label.cuda()
                 inputs_shape = inputs.shape
-                print(fname)
+                #print(fname)
                 # reshape to (B*P,C,D,H,W), P - patches
                 #inputs = inputs.view(inputs_shape[0]*inputs_shape[1], 1, inputs_shape[2], inputs_shape[3], inputs_shape[4])
                 #gt_mask = gt_mask.view(inputs_shape[0]*inputs_shape[1], inputs_shape[2], inputs_shape[3], inputs_shape[4]) # 256, 1, 64, 64, 48
