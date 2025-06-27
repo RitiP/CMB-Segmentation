@@ -100,6 +100,8 @@ class AbstractUNet(nn.Module):
             # of the previous decoder
             x = decoder(encoder_features, x)
 
+        #change 1 - decoder_feat = x.copy()
+        decoder_feat = x.clone()
         x = self.final_conv(x)
 
         # apply final_activation (i.e. Sigmoid or Softmax) only during prediction.
@@ -107,7 +109,7 @@ class AbstractUNet(nn.Module):
         #if not self.training and self.final_activation is not None:
         #    x = self.final_activation(x)
 
-        return x
+        return x, decoder_feat
 
 
 class UNet3D(AbstractUNet):
